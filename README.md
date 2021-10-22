@@ -1,6 +1,6 @@
 # Streaming Video with RTSP and RTP
 
-## Intro
+## Introduction
 ASSIGNMENT 1 
 
 Course: Computer Network, Semester 1, 2021-2022
