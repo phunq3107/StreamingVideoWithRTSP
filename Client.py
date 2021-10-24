@@ -30,6 +30,9 @@ class Client:
     teardownBtn: Button
 
     label: Label
+    message: Label
+
+    inputName: Text
 
     playEvent: threading.Event
 
@@ -57,36 +60,52 @@ class Client:
 
     def buildClientGUI(self):
         """Build GUI."""
+        # Create a label to display the movie
+        self.label = Label(self.master, height=19)
+        self.label.grid(row=0, column=0, columnspan=3, sticky=W + E + N + S, padx=5, pady=5)
+
+        # Message:
+        self.message = Label(self.master, text='Please choose file name before playing')
+        self.message.grid(row=1, column=0, columnspan=3, sticky=W + E + N + S, padx=5, pady=5)
+
+        # Input name
+        self.inputName = Text(self.master, height=1, width=10)
+        self.inputName.grid(row=2, column=0, columnspan=2, sticky=W + E + N + S, padx=5, pady=5)
+
         # Create Setup button
         self.setupBtn = Button(self.master, width=20, padx=3, pady=3)
         self.setupBtn["text"] = "Setup"
         self.setupBtn["command"] = self.setupMovie
-        self.setupBtn.grid(row=1, column=0, padx=2, pady=2)
+        self.setupBtn.grid(row=2, column=2, padx=2, pady=2)
 
         # Create Play button
         self.startBtn = Button(self.master, width=20, padx=3, pady=3)
         self.startBtn["text"] = "Play"
         self.startBtn["command"] = self.playMovie
-        self.startBtn.grid(row=1, column=1, padx=2, pady=2)
+        self.startBtn.grid(row=3, column=0, padx=2, pady=2)
 
         # Create Pause button
         self.pauseBtn = Button(self.master, width=20, padx=3, pady=3)
         self.pauseBtn["text"] = "Pause"
         self.pauseBtn["command"] = self.pauseMovie
-        self.pauseBtn.grid(row=1, column=2, padx=2, pady=2)
+        self.pauseBtn.grid(row=3, column=1, padx=2, pady=2)
 
         # Create Teardown button
         self.teardownBtn = Button(self.master, width=20, padx=3, pady=3)
         self.teardownBtn["text"] = "Teardown"
         self.teardownBtn["command"] = self.exitClient
-        self.teardownBtn.grid(row=1, column=3, padx=2, pady=2)
-
-        # Create a label to display the movie
-        self.label = Label(self.master, height=19)
-        self.label.grid(row=0, column=0, columnspan=4, sticky=W + E + N + S, padx=5, pady=5)
+        self.teardownBtn.grid(row=3, column=2, padx=2, pady=2)
 
     def setupMovie(self):
         """Setup button handler."""
+        filename = self.inputName.get(1.0, "end-1c")
+
+        if filename != self.fileName:
+            self.state = self.INIT
+            self.fileName = filename
+            self.sendRtspRequest(self.TEARDOWN)
+            self.__init__(self.master, self.serverAddr, self.serverPort, self.rtpPort, self.fileName)
+
         if self.state == self.INIT:
             self.sendRtspRequest(self.SETUP)
 
@@ -95,11 +114,14 @@ class Client:
         self.sendRtspRequest(self.TEARDOWN)
         print("[INFO]: Close app")
 
-        cachename = CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT
-        try:
-            os.remove(cachename)
-        except:
-            print("[ERROR]: No such file or directory named " + cachename)
+        cachename = CACHE_FILE_NAME
+
+        for file in os.listdir():
+            if file.startswith("cache-") & file.endswith(".jpg"):
+                try:
+                    os.remove(file)
+                except:
+                    print("[ERROR]: No such file or directory named " + file)
         self.master.destroy()
 
     def pauseMovie(self):
@@ -220,28 +242,29 @@ class Client:
             # Resume request
 
             # Teardown request
-        elif requestCode == self.TEARDOWN and not self.state == self.INIT:
+        elif requestCode == self.TEARDOWN:
             self.rtspSeq = self.rtspSeq + 1
             request = "TEARDOWN " + "\n" \
                       + str(self.rtspSeq)
             self.rtspSocket.send(request.encode('utf-8'))
             self.requestSent = self.TEARDOWN
-
         else:
             return
 
     def recvRtspReply(self):
         """Receive RTSP reply from the server."""
         while True:
-            reply = self.rtspSocket.recv(1024)
+            try:
+                reply = self.rtspSocket.recv(1024)
+                if reply:
+                    self.parseRtspReply(reply)
 
-            if reply:
-                self.parseRtspReply(reply)
-
-            if self.requestSent == self.TEARDOWN:
-                self.rtspSocket.shutdown(socket.SHUT_RDWR)
-                self.rtspSocket.close()
-                break
+                if self.requestSent == self.TEARDOWN:
+                    self.rtspSocket.shutdown(socket.SHUT_RDWR)
+                    self.rtspSocket.close()
+                    break
+            except:
+                pass
 
     def parseRtspReply(self, data):
         """Parse the RTSP reply from the server."""
@@ -256,19 +279,27 @@ class Client:
                 self.sessionId = session
 
             if self.sessionId == session:
-                if int(lines[0].split(' ')[1]) == 200:
-                    if self.requestSent == self.SETUP:
+
+                if self.requestSent == self.SETUP:
+                    if int(lines[0].split(' ')[1]) == 200:
                         self.state = self.READY
                         print("[INFO]: state -> READY")
                         self.openRtpPort()
-                    elif self.requestSent == self.PLAY:
+                        self.message.configure(text="Ready to play")
+                    elif int(lines[0].split(' ')[1]) == 404:
+                        print("[ERROR]: File not exists")
+                        self.message.configure(text="File not exists")
+                elif self.requestSent == self.PLAY:
+                    if int(lines[0].split(' ')[1]) == 200:
                         self.state = self.PLAYING
                         print("[INFO]: state -> PLAYING")
-                    elif self.requestSent == self.PAUSE:
+                elif self.requestSent == self.PAUSE:
+                    if int(lines[0].split(' ')[1]) == 200:
                         self.state = self.READY
                         print("[INFO]: state -> READY")
-                        self.playEvent.set()
-                    elif self.requestSent == self.TEARDOWN:
+                    self.playEvent.set()
+                elif self.requestSent == self.TEARDOWN:
+                    if int(lines[0].split(' ')[1]) == 200:
                         self.teardownAcked = 1
 
     def openRtpPort(self):
