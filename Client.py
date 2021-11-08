@@ -1,6 +1,7 @@
 import os
 import socket
 import threading
+import time
 import tkinter.messagebox as tkMessageBox
 from tkinter import *
 
@@ -17,17 +18,24 @@ class Client:
     READY = 1
     PLAYING = 2
     state = INIT
+    speed = 1
 
     SETUP = 0
     PLAY = 1
     PAUSE = 2
     TEARDOWN = 3
+    SPEEDUP = 4
+    DESCRIBE = 5
 
     # GUI Component
     setupBtn: Button
     startBtn: Button
     pauseBtn: Button
     teardownBtn: Button
+    describeBtn: Button
+    speed1: Button
+    speed2: Button
+    speed4: Button
 
     label: Label
     message: Label
@@ -38,6 +46,12 @@ class Client:
 
     # Socket
     rtspSocket: socket.socket
+
+    # for summarize
+    timeStart: float
+    lossFrame = 0
+    totalFrame = 0
+    sumData = 0
 
     # Initiation..
     def __init__(self, master, serveraddr, serverport, rtpport, filename):
@@ -54,6 +68,7 @@ class Client:
         self.teardownAcked = 0
         self.connectToServer()
         self.frameNbr = 0
+        self.timeStart = time.time()
 
         # custom
         self.rtpSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -96,6 +111,30 @@ class Client:
         self.teardownBtn["command"] = self.exitClient
         self.teardownBtn.grid(row=3, column=2, padx=2, pady=2)
 
+        # Create Describe button
+        self.describeBtn = Button(self.master, width=20, padx=3, pady=3)
+        self.describeBtn["text"] = "Describe"
+        self.describeBtn["command"] = self.describe
+        self.describeBtn.grid(row=4, column=2, padx=2, pady=2)
+
+        # Create Speed up button
+        self.speed1 = Button(self.master, width=20, padx=3, pady=3)
+        self.speed1["text"] = "x1"
+        self.speed1["command"] = self.setSpeed1
+        self.speed1.grid(row=5, column=0, padx=2, pady=2)
+
+        # Create Speed up button
+        self.speed2 = Button(self.master, width=20, padx=3, pady=3)
+        self.speed2["text"] = "x2"
+        self.speed2["command"] = self.setSpeed2
+        self.speed2.grid(row=5, column=1, padx=2, pady=2)
+
+        # Create Speed up button
+        self.speed4 = Button(self.master, width=20, padx=3, pady=3)
+        self.speed4["text"] = "x4"
+        self.speed4["command"] = self.setSpeed4
+        self.speed4.grid(row=5, column=2, padx=2, pady=2)
+
     def setupMovie(self):
         """Setup button handler."""
         filename = self.inputName.get(1.0, "end-1c")
@@ -112,6 +151,7 @@ class Client:
     def exitClient(self):
         """Teardown button handler."""
         self.sendRtspRequest(self.TEARDOWN)
+        self.summary()
         print("[INFO]: Close app")
 
         cachename = CACHE_FILE_NAME
@@ -121,7 +161,7 @@ class Client:
                 try:
                     os.remove(file)
                 except:
-                    print("[ERROR]: No such file or directory named " + file)
+                    pass
         self.master.destroy()
 
     def pauseMovie(self):
@@ -137,6 +177,24 @@ class Client:
             self.playEvent.clear()
             self.sendRtspRequest(self.PLAY)
 
+    def setSpeed1(self):
+        if self.state == self.PLAYING:
+            self.speed = 1
+            self.sendRtspRequest(self.SPEEDUP)
+
+    def setSpeed2(self):
+        if self.state == self.PLAYING:
+            self.speed = 2
+            self.sendRtspRequest(self.SPEEDUP)
+
+    def setSpeed4(self):
+        if self.state == self.PLAYING:
+            self.speed = 4
+            self.sendRtspRequest(self.SPEEDUP)
+
+    def describe(self):
+        self.sendRtspRequest(self.DESCRIBE)
+
     def listenRtp(self):
         """Listen for RTP packets."""
         while True:
@@ -145,16 +203,21 @@ class Client:
                 if data:
                     rtpPacket = RtpPacket()
                     rtpPacket.decode(data)
+                    self.sumData += len(data)
 
                     currFrameNbr = rtpPacket.seqNum()
 
-                    if currFrameNbr > self.frameNbr:  # Discard the late packet
+                    if currFrameNbr > self.frameNbr:
+                        self.lossFrame += currFrameNbr - self.frameNbr - 1
                         self.frameNbr = currFrameNbr
                         self.updateMovie(self.writeFrame(rtpPacket.getPayload()))
             except:
                 # Stop listening upon requesting PAUSE or TEARDOWN
-                if self.playEvent.set():
-                    break
+                try:
+                    if self.playEvent.set():
+                        break
+                except:
+                    pass
 
                 # Upon receiving ACK for TEARDOWN request,
                 # close the RTP socket
@@ -173,6 +236,7 @@ class Client:
 
         try:
             file = open(cachename, "wb")
+            self.totalFrame += 1
             try:
                 file.write(data)
             except:
@@ -205,49 +269,45 @@ class Client:
         print("[INFO]: Sending request:", requestCode)
         if requestCode == self.SETUP and self.state == self.INIT:
             threading.Thread(target=self.recvRtspReply).start()
-
             self.rtspSeq = 1
-
             request = "SETUP " + str(self.fileName) + "\n" \
                       + str(self.rtspSeq) + "\n" \
                       + "RTSP/1.0 RTP/UDP " + str(self.rtpPort)
-
             self.rtspSocket.send(request.encode('utf-8'))
             self.requestSent = self.SETUP
-
+        # Play request
         elif requestCode == self.PLAY and self.state == self.READY:
-            # Update RTSP sequence number.
-            # ...
             self.rtspSeq = self.rtspSeq + 1
-            # Write the RTSP request to be sent.
-            # request = ...
             request = "PLAY " + "\n" \
                       + str(self.rtspSeq)
 
             self.rtspSocket.send(request.encode('utf-8'))
             self.requestSent = self.PLAY
 
-            # Pause request
+        # Pause request
         elif requestCode == self.PAUSE and self.state == self.PLAYING:
-            # Update RTSP sequence number.
-            # ...
             self.rtspSeq = self.rtspSeq + 1
-            # Write the RTSP request to be sent.
-            # request = ...
             request = "PAUSE " + "\n" \
                       + str(self.rtspSeq)
             self.rtspSocket.send(request.encode('utf-8'))
             self.requestSent = self.PAUSE
 
-            # Resume request
-
-            # Teardown request
+        # Teardown request
         elif requestCode == self.TEARDOWN:
             self.rtspSeq = self.rtspSeq + 1
             request = "TEARDOWN " + "\n" \
                       + str(self.rtspSeq)
             self.rtspSocket.send(request.encode('utf-8'))
             self.requestSent = self.TEARDOWN
+        elif requestCode == self.SPEEDUP:
+            request = "SPEEDUP " + "\n" \
+                      + str(self.speed)
+            self.rtspSocket.send(request.encode('utf-8'))
+        elif requestCode == self.DESCRIBE:
+            request = "DESCRIBE " + "\n" \
+                      + str(self.rtspSeq)
+            self.rtspSocket.send(request.encode('utf-8'))
+            self.requestSent = self.DESCRIBE
         else:
             return
 
@@ -272,35 +332,40 @@ class Client:
         lines = str(data).split('\n')
         seqNum = int(lines[1].split(' ')[1])
 
-        # Process only if the server reply's sequence number is the same as the request's
         if seqNum == self.rtspSeq:
             session = int(lines[2].split(' ')[1])
             if self.sessionId == 0:
                 self.sessionId = session
 
             if self.sessionId == session:
-
+                responseCode = int(lines[0].split(' ')[1])
                 if self.requestSent == self.SETUP:
-                    if int(lines[0].split(' ')[1]) == 200:
+                    if responseCode == 200:
                         self.state = self.READY
                         print("[INFO]: state -> READY")
                         self.openRtpPort()
                         self.message.configure(text="Ready to play")
-                    elif int(lines[0].split(' ')[1]) == 404:
+                    elif responseCode == 404:
                         print("[ERROR]: File not exists")
                         self.message.configure(text="File not exists")
                 elif self.requestSent == self.PLAY:
-                    if int(lines[0].split(' ')[1]) == 200:
+                    if responseCode == 200:
                         self.state = self.PLAYING
                         print("[INFO]: state -> PLAYING")
                 elif self.requestSent == self.PAUSE:
-                    if int(lines[0].split(' ')[1]) == 200:
+                    if responseCode == 200:
                         self.state = self.READY
                         print("[INFO]: state -> READY")
                     self.playEvent.set()
                 elif self.requestSent == self.TEARDOWN:
-                    if int(lines[0].split(' ')[1]) == 200:
+                    if responseCode == 200:
                         self.teardownAcked = 1
+                elif self.requestSent == self.DESCRIBE:
+                    if responseCode == 200:
+                        print("-"*20)
+                        print("Describe:")
+                        print(data)
+                        print("-" * 20)
 
     def openRtpPort(self):
         """Open RTP socket binded to a specified port."""
@@ -312,12 +377,27 @@ class Client:
         except:
             tkMessageBox.showwarning('Connection Failed', 'Connection to rtpServer failed...')
 
+    def summary(self):
+        timeEnd = time.time()
+        connectionTime = timeEnd - self.timeStart
+        lossRate = self.lossFrame * 100.0 / self.totalFrame if self.totalFrame > 0 else 0
+        print("=" * 20 + "Streaming summary" + "=" * 20)
+        print("Connection time              : {} s".format(round(connectionTime, 3)))
+        print("Number of frames received    : {} frame".format(self.totalFrame))
+        print("Number of frames loss        : {} frame".format(self.lossFrame))
+        print("Loss rate                    : {} %".format(round(lossRate)))
+        print("Total data received          : {} byte".format(self.sumData))
+        print("=" * 58)
+
     def handler(self):
         """Handler on explicitly closing the GUI window."""
         self.pauseMovie()
         if tkMessageBox.askokcancel("Quit?", "Are you sure you want to quit?"):
             self.exitClient()
+            self.summary()
+            print("[INFO]: Close app")
         else:
+            self.summary()
             print("[INFO]: Close app")
             threading.Thread(target=self.listenRtp).start()
             self.sendRtspRequest(self.PLAY)
